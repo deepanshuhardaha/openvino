@@ -43,7 +43,7 @@ namespace ov::intel_cpu::node {
 
 bool MatMul::canBeExecutedInInt8() const {
     auto firstInputPrecision = getOriginalInputPrecisionAtPort(0);
-    auto secondInputPrecision = getOriginalInputPrecisionAtPort(1);
+    auto secondInputPrecision = ov::element::f32;
 
     return any_of(firstInputPrecision, ov::element::u8, ov::element::i8) && secondInputPrecision == ov::element::i8;
 }
@@ -227,7 +227,8 @@ ov::element::Type MatMul::getRuntimePrecision() const {
         }
     }
 
-    return getMaxPrecision(inputPrecisions);
+    // Force FP32 to keep matmul computations on full precision path on Intel CPUs.
+    return ov::element::f32;
 }
 
 const std::vector<impl_desc_type>& MatMul::getDefaultImplPriority() {

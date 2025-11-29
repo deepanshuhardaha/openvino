@@ -100,10 +100,8 @@ void SoftMax::getSupportedDescriptors() {
         return;
     }
 
-    ov::element::Type precision = getOriginalInputPrecisionAtPort(0);
-    if (none_of(precision, ov::element::f32, ov::element::bf16, ov::element::f16)) {
-        precision = ov::element::f32;
-    }
+    // Force FP32 descriptors for CPU backend to guarantee deterministic numerical behavior.
+    ov::element::Type precision = ov::element::f32;
     auto inputDataType = DnnlExtensionUtils::ElementTypeToDataType(precision);
 
     CPU_NODE_ASSERT(getParentEdges().size() == 1, "Incorrect number of input edges");
@@ -133,6 +131,7 @@ bool SoftMax::created() const {
 Node::AttrPtr SoftMax::initPrimitiveAttr() {
     auto attr = std::make_shared<dnnl::primitive_attr>(dnnl::primitive_attr());
     (*attr).set_scratchpad_mode(dnnl::scratchpad_mode::user);
+    attr->set_fpmath_mode(dnnl::fpmath_mode::strict);
 
     return attr;
 }
@@ -164,13 +163,24 @@ void SoftMax::createDescriptor(const std::vector<MemoryDescPtr>& inputDesc,
     DnnlMemoryDescPtr definedInpMemDesc = MemoryDescUtils::convertToDnnlMemoryDesc(inpDesc);
     auto in_candidate = definedInpMemDesc->getDnnlDesc();
 
+    auto dims = in_candidate.get_dims();
+    auto format_kind = in_candidate.get_format_kind();
+
+    dnnl::memory::desc fp32_candidate;
+    if (format_kind == dnnl::memory::format_kind::blocked) {
+        auto strides = in_candidate.get_strides();
+        fp32_candidate = dnnl::memory::desc(dims, dnnl::memory::data_type::f32, strides);
+    } else {
+        fp32_candidate = dnnl::memory::desc(dims, dnnl::memory::data_type::f32, dnnl::memory::format_tag::any);
+    }
+
     auto attr = initPrimitiveAttr();
 
     auto desc = softmax_forward::primitive_desc(getEngine(),
                                                 prop_kind::forward_inference,
                                                 algorithm::softmax_accurate,
-                                                in_candidate,
-                                                in_candidate,
+                                                fp32_candidate,
+                                                fp32_candidate,
                                                 axis,
                                                 *attr,
                                                 true);
@@ -192,11 +202,16 @@ void SoftMax::prepareParams() {
     auto engine = getEngine();
 
     auto builder = [&engine](const SoftmaxKey& key) -> executorPtr {
+        const auto original_desc = key.inp0->getDnnlDesc();
+        const auto dims = original_desc.get_dims();
+        const auto strides = original_desc.get_strides();
+        dnnl::memory::desc fp32_desc(dims, dnnl::memory::data_type::f32, strides);
+
         auto prim_desc = softmax_forward::primitive_desc(engine,
                                                          prop_kind::forward_inference,
                                                          algorithm::softmax_accurate,
-                                                         key.inp0->getDnnlDesc(),
-                                                         key.inp0->getDnnlDesc(),
+                                                         fp32_desc,
+                                                         fp32_desc,
                                                          key.axis,
                                                          key.attr,
                                                          true);
