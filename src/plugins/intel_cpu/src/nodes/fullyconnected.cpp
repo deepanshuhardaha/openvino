@@ -573,6 +573,13 @@ void FullyConnected::initSupportedPrimitiveDescriptors() {
 
     const auto& srcTypes = getOriginalInputPrecisions();
     auto dstTypes = getOriginalOutputPrecisions();
+    const bool forceFp32 = shouldForceFP32();
+    auto getEffectiveType = [&](const ov::element::Type& type) {
+        if (!forceFp32 || type == element::dynamic || !type.is_real() || type == ov::element::f32) {
+            return type;
+        }
+        return ov::element::f32;
+    };
     // @todo graph optimizer should update original output precisions instead
     if (!fusedWith.empty()) {
         dstTypes = fusedWith.back()->getOriginalOutputPrecisions();
@@ -581,17 +588,19 @@ void FullyConnected::initSupportedPrimitiveDescriptors() {
     VecMemoryDescs srcDescs;
     const auto& creatorsMap = BlockedDescCreator::getCommonCreators();
     for (size_t i = 0; i < srcTypes.size(); i++) {
-        if (srcTypes[i] == element::dynamic) {
+        const auto effectiveType = getEffectiveType(srcTypes[i]);
+        if (effectiveType == element::dynamic) {
             srcDescs.push_back(MemoryDescUtils::makeEmptyDesc());
             continue;
         }
-        const auto srcDesc = creatorsMap.at(LayoutType::ncsp)->createSharedDesc(srcTypes[i], getInputShapeAtPort(i));
+        const auto srcDesc = creatorsMap.at(LayoutType::ncsp)->createSharedDesc(effectiveType, getInputShapeAtPort(i));
         srcDescs.push_back(srcDesc);
     }
 
     VecMemoryDescs dstDescs;
     for (size_t i = 0; i < dstTypes.size(); i++) {
-        const auto dstDesc = creatorsMap.at(LayoutType::ncsp)->createSharedDesc(dstTypes[i], getOutputShapeAtPort(i));
+        const auto dstDesc =
+            creatorsMap.at(LayoutType::ncsp)->createSharedDesc(getEffectiveType(dstTypes[i]), getOutputShapeAtPort(i));
         dstDescs.push_back(dstDesc);
     }
 
@@ -728,7 +737,28 @@ ov::element::Type FullyConnected::getRuntimePrecision() const {
         }
     }
 
+    if (shouldForceFP32()) {
+        return ov::element::f32;
+    }
+
     return getMaxPrecision(srcTypes);
+}
+
+bool FullyConnected::shouldForceFP32() const {
+    if (canBeExecutedInInt8()) {
+        return false;
+    }
+
+    auto isReal = [](const ov::element::Type& type) {
+        return type != ov::element::dynamic && type.is_real();
+    };
+
+    const auto& srcTypes = getOriginalInputPrecisions();
+    if (std::any_of(srcTypes.begin(), srcTypes.end(), isReal)) {
+        return true;
+    }
+
+    return isReal(getOriginalOutputPrecisionAtPort(0));
 }
 
 }  // namespace ov::intel_cpu::node

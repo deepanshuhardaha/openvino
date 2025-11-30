@@ -68,6 +68,8 @@ private:
 
     // Argument to input port mapping
     std::unordered_map<int, int> m_atoi;
+
+    bool shouldForceFP32() const;
 };
 
 }  // namespace ov::intel_cpu::node

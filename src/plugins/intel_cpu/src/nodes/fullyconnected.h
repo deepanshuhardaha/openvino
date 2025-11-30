@@ -126,6 +126,8 @@ private:
     ExecutorPtr executor = nullptr;
 
     FCTensorParallelConfig tp_cfg;
+
+    bool shouldForceFP32() const;
 };
 
 }  // namespace ov::intel_cpu::node

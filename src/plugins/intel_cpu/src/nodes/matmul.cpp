@@ -39,11 +39,21 @@
 #include "utils/debug_capabilities.h"
 #include "utils/general_utils.h"
 
+namespace {
+ov::element::Type force_fp32_if_needed(const ov::element::Type& original, bool forceFp32) {
+    if (!forceFp32 || original == ov::element::dynamic) {
+        return original;
+    }
+
+    return original.is_real() && original != ov::element::f32 ? ov::element::f32 : original;
+}
+}  // namespace
+
 namespace ov::intel_cpu::node {
 
 bool MatMul::canBeExecutedInInt8() const {
     auto firstInputPrecision = getOriginalInputPrecisionAtPort(0);
-    auto secondInputPrecision = ov::element::f32;
+    auto secondInputPrecision = getOriginalInputPrecisionAtPort(1);
 
     return any_of(firstInputPrecision, ov::element::u8, ov::element::i8) && secondInputPrecision == ov::element::i8;
 }
@@ -132,19 +142,22 @@ bool MatMul::canFuse(const NodePtr& node) const {
 
 std::tuple<VecMemoryDescs, MemoryDescPtr> MatMul::initMemoryDescriptors(ov::element::Type dstType) const {
     const auto& srcTypes = getOriginalInputPrecisions();
+    const bool forceFp32 = shouldForceFP32();
 
     VecMemoryDescs srcDescs;
     const auto& creatorsMap = BlockedDescCreator::getCommonCreators();
     for (size_t i = 0; i < srcTypes.size(); i++) {
-        if (srcTypes[i] == ov::element::dynamic) {
+        const auto effectiveType = force_fp32_if_needed(srcTypes[i], forceFp32);
+        if (effectiveType == ov::element::dynamic) {
             srcDescs.push_back(MemoryDescUtils::makeEmptyDesc());
             continue;
         }
-        auto srcDesc = creatorsMap.at(LayoutType::ncsp)->createSharedDesc(srcTypes[i], getInputShapeAtPort(i));
+        auto srcDesc = creatorsMap.at(LayoutType::ncsp)->createSharedDesc(effectiveType, getInputShapeAtPort(i));
         srcDescs.push_back(srcDesc);
     }
 
-    auto dstDesc = creatorsMap.at(LayoutType::ncsp)->createSharedDesc(dstType, getOutputShapeAtPort(0));
+    auto dstDesc =
+        creatorsMap.at(LayoutType::ncsp)->createSharedDesc(force_fp32_if_needed(dstType, forceFp32), getOutputShapeAtPort(0));
 
     return {srcDescs, dstDesc};
 }
@@ -216,6 +229,22 @@ bool MatMul::created() const {
     return getType() == Type::MatMul;
 }
 
+bool MatMul::shouldForceFP32() const {
+    if (canBeExecutedInInt8()) {
+        return false;
+    }
+
+    auto isReal = [](const ov::element::Type& type) {
+        return type != ov::element::dynamic && type.is_real();
+    };
+
+    if (isReal(getOriginalInputPrecisionAtPort(0)) || isReal(getOriginalInputPrecisionAtPort(1))) {
+        return true;
+    }
+
+    return isReal(getOriginalOutputPrecisionAtPort(0));
+}
+
 ov::element::Type MatMul::getRuntimePrecision() const {
     std::vector<ov::element::Type> inputPrecisions;
     // Don't take bias precision into account
@@ -227,8 +256,11 @@ ov::element::Type MatMul::getRuntimePrecision() const {
         }
     }
 
-    // Force FP32 to keep matmul computations on full precision path on Intel CPUs.
-    return ov::element::f32;
+    if (shouldForceFP32()) {
+        return ov::element::f32;
+    }
+
+    return getMaxPrecision(inputPrecisions);
 }
 
 const std::vector<impl_desc_type>& MatMul::getDefaultImplPriority() {
