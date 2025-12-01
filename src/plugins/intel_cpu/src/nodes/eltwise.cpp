@@ -639,6 +639,7 @@ void Eltwise::initSupportedPrimitiveDescriptors() {
     m_attrs.data.algo = getAlgorithm();
     m_attrs.postOps = getPostOps(fusedWith, ov::element::dynamic);
     m_attrs.opsList = {getType()};
+    const bool forceFp32 = shouldForceFP32();
 
     // Create memory descriptors
     std::vector<MemoryDescPtr> srcDescs;
@@ -650,15 +651,19 @@ void Eltwise::initSupportedPrimitiveDescriptors() {
 
     // Create src memory descriptors
     for (size_t i = 0; i < getParentEdges().size(); i++) {
-        auto srcDesc = creatorsMap.at(preferredLayout)
-                           ->createSharedDesc(getOriginalInputPrecisionAtPort(i), getInputShapeAtPort(i));
+        auto inputPrecision = getOriginalInputPrecisionAtPort(i);
+        if (forceFp32 && inputPrecision.is_real()) {
+            inputPrecision = ov::element::f32;
+        }
+        auto srcDesc = creatorsMap.at(preferredLayout)->createSharedDesc(inputPrecision, getInputShapeAtPort(i));
         srcDescs.push_back(srcDesc);
     }
 
     // Create dst memory descriptors
     const auto dstPrecision = !fusedWith.empty() ? fusedWith.back()->getOriginalOutputPrecisionAtPort(0)
                                                  : getOriginalOutputPrecisionAtPort(0);
-    auto dstDesc = creatorsMap.at(preferredLayout)->createSharedDesc(dstPrecision, getOutputShapeAtPort(0));
+    const auto effectiveDstPrecision = forceFp32 && dstPrecision.is_real() ? ov::element::f32 : dstPrecision;
+    auto dstDesc = creatorsMap.at(preferredLayout)->createSharedDesc(effectiveDstPrecision, getOutputShapeAtPort(0));
 
     // Prepare memory descriptor arguments for a factory
     MemoryDescArgs descs;
@@ -826,6 +831,10 @@ ov::element::Type Eltwise::getRuntimePrecision() const {
             inputPrecisions.emplace_back(
                 DnnlExtensionUtils::DataTypeToElementType((parentEdge->getMemoryPtr()->getDataType())));
         }
+    }
+
+    if (shouldForceFP32()) {
+        return ov::element::f32;
     }
 
     return getMaxPrecision(inputPrecisions);
@@ -1107,6 +1116,21 @@ bool Eltwise::appendAttrPostOps(DnnlPostOpsComposerLegacy& dnnlpoc,
         }
     }
     return true;
+}
+
+bool Eltwise::shouldForceFP32() const {
+    Algorithm algo = m_attrs.data.algo;
+    if (algo == Algorithm::Default) {
+        algo = getAlgorithm();
+    }
+
+    switch (algo) {
+    case Algorithm::EltwisePrelu:
+    case Algorithm::EltwiseSigmoid:
+        return true;
+    default:
+        return false;
+    }
 }
 
 bool Eltwise::canFuseParent(const NodePtr& parentNode) const {

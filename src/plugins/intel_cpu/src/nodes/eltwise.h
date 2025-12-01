@@ -116,6 +116,7 @@ private:
                            const VectorDims& postOpDims,
                            std::vector<T>& postOpsMem,
                            int channelAxis = 1);
+    bool shouldForceFP32() const;
 
     ExecutorFactoryPtr<EltwiseAttrs> m_factory;
     ExecutorPtr m_executor;
